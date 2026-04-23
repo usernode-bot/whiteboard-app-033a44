@@ -2,8 +2,8 @@
 <html lang="en" class="dark">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
   <script>
   // usernode-dev-console@1
   (function () {
@@ -63,59 +63,450 @@
     try { post('info', ['[dev-console ready]'], { kind: 'ready' }); } catch (_) {}
   })();
   </script>
-  <title>whiteboard app</title>
+  <title>Whiteboard</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script>tailwind.config = { darkMode: 'class' }</script>
+  <style>
+    html, body { overflow: hidden; height: 100%; margin: 0; }
+    canvas { touch-action: none; display: block; }
+    .tool-btn { transition: all 0.15s; }
+    .tool-btn.active { background: #7c3aed; color: white; }
+    .color-swatch {
+      width: 22px; height: 22px; border-radius: 50%; cursor: pointer;
+      border: 2px solid transparent; transition: all 0.15s; flex-shrink: 0;
+    }
+    .color-swatch.active { border-color: #a78bfa; transform: scale(1.15); }
+    .color-swatch:hover { transform: scale(1.1); }
+    input[type="range"] {
+      -webkit-appearance: none; appearance: none;
+      height: 4px; border-radius: 2px; background: #3f3f46; outline: none;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 14px; height: 14px;
+      border-radius: 50%; background: #8b5cf6; cursor: pointer;
+    }
+    .user-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  </style>
 </head>
-<body class="bg-zinc-950 text-zinc-100 min-h-screen flex flex-col items-center justify-center gap-8 p-4">
-  <h1 class="text-2xl font-bold">whiteboard app</h1>
+<body class="bg-zinc-900 h-screen flex flex-col">
 
-  <button id="press-btn" class="w-32 h-32 rounded-full bg-violet-600 hover:bg-violet-500 active:scale-95 transition-all text-white text-xl font-bold shadow-lg shadow-violet-600/30">
-    Press!
-  </button>
+  <!-- Toolbar -->
+  <div class="flex items-center gap-3 px-3 py-2 bg-zinc-900/95 backdrop-blur border-b border-zinc-800 z-20 overflow-x-auto flex-shrink-0">
+    <div id="status-dot" class="w-2 h-2 rounded-full bg-red-500 flex-shrink-0" title="Disconnected"></div>
 
-  <div id="count" class="text-lg text-zinc-400">0 total presses</div>
+    <div class="flex items-center bg-zinc-800/80 rounded-lg p-0.5 gap-0.5">
+      <button data-tool="pen" class="tool-btn active px-2.5 py-1 rounded-md text-xs font-medium text-zinc-400">Pen</button>
+      <button data-tool="eraser" class="tool-btn px-2.5 py-1 rounded-md text-xs font-medium text-zinc-400">Eraser</button>
+    </div>
 
-  <div class="w-full max-w-sm">
-    <h2 class="text-sm font-medium text-zinc-500 mb-2 text-center">Leaderboard</h2>
-    <div id="leaderboard" class="space-y-1"></div>
+    <div class="w-px h-5 bg-zinc-700/60 flex-shrink-0"></div>
+
+    <div id="colors" class="flex items-center gap-1"></div>
+
+    <div class="w-px h-5 bg-zinc-700/60 flex-shrink-0"></div>
+
+    <div class="flex items-center gap-2 flex-shrink-0">
+      <input id="size-range" type="range" min="1" max="20" value="3" class="w-16">
+      <span id="size-val" class="text-xs text-zinc-500 tabular-nums w-3 text-right">3</span>
+    </div>
+
+    <div class="w-px h-5 bg-zinc-700/60 flex-shrink-0"></div>
+
+    <button id="btn-undo" class="px-2 py-1 rounded text-xs text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition flex-shrink-0" title="Ctrl+Z">Undo</button>
+    <button id="btn-clear" class="px-2 py-1 rounded text-xs text-red-400/80 hover:text-red-300 hover:bg-zinc-800 transition flex-shrink-0">Clear</button>
+
+    <div class="flex-1"></div>
+
+    <div id="users-list" class="flex items-center gap-2 flex-shrink-0"></div>
+  </div>
+
+  <!-- Canvas -->
+  <div id="canvas-wrap" class="flex-1 relative overflow-hidden" style="background:#ffffff">
+    <canvas id="canvas" style="position:absolute;top:0;left:0"></canvas>
+    <div id="cursors" class="absolute inset-0 pointer-events-none overflow-hidden"></div>
   </div>
 
   <script>
-    const params = new URLSearchParams(window.location.search);
-    const token = params.get('token') || '';
-    const headers = token ? { 'x-usernode-token': token } : {};
+    const COLORS = ['#1e1e1e','#6b7280','#dc2626','#ea580c','#ca8a04','#16a34a','#2563eb','#7c3aed','#db2777'];
 
-    async function loadLeaderboard() {
-      const res = await fetch('/api/leaderboard', { headers });
-      if (!res.ok) return;
-      const { leaderboard } = await res.json();
-      const el = document.getElementById('leaderboard');
-      if (!leaderboard.length) {
-        el.innerHTML = '<p class="text-center text-zinc-600 text-sm">No presses yet</p>';
-        return;
+    const params = new URLSearchParams(location.search);
+    const token = params.get('token') || '';
+
+    let strokes = [];
+    let currentStroke = null;
+    const remoteDrawing = new Map();
+    let activeTool = 'pen';
+    let activeColor = COLORS[0];
+    let activeSize = 3;
+    let isDrawing = false;
+    let canvasW = 0;
+    let canvasH = 0;
+    let myUserId = null;
+
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const base = document.createElement('canvas');
+    const baseCtx = base.getContext('2d');
+
+    // --- Drawing ---
+
+    function drawStroke(tctx, s) {
+      const pts = s.points;
+      if (!pts || !pts.length) return;
+      const dpr = devicePixelRatio || 1;
+      tctx.save();
+      tctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (s.tool === 'eraser') tctx.globalCompositeOperation = 'destination-out';
+      tctx.lineWidth = s.size;
+      tctx.lineCap = 'round';
+      tctx.lineJoin = 'round';
+      tctx.strokeStyle = s.tool === 'eraser' ? 'rgba(0,0,0,1)' : s.color;
+      tctx.fillStyle = tctx.strokeStyle;
+
+      if (pts.length === 1) {
+        tctx.beginPath();
+        tctx.arc(pts[0].x * canvasW, pts[0].y * canvasH, s.size / 2, 0, Math.PI * 2);
+        tctx.fill();
+      } else if (pts.length === 2) {
+        tctx.beginPath();
+        tctx.moveTo(pts[0].x * canvasW, pts[0].y * canvasH);
+        tctx.lineTo(pts[1].x * canvasW, pts[1].y * canvasH);
+        tctx.stroke();
+      } else {
+        tctx.beginPath();
+        tctx.moveTo(pts[0].x * canvasW, pts[0].y * canvasH);
+        for (let i = 1; i < pts.length - 1; i++) {
+          const cx = pts[i].x * canvasW, cy = pts[i].y * canvasH;
+          const nx = pts[i + 1].x * canvasW, ny = pts[i + 1].y * canvasH;
+          tctx.quadraticCurveTo(cx, cy, (cx + nx) / 2, (cy + ny) / 2);
+        }
+        const last = pts[pts.length - 1];
+        tctx.lineTo(last.x * canvasW, last.y * canvasH);
+        tctx.stroke();
       }
-      el.innerHTML = leaderboard.map((r, i) =>
-        '<div class="flex justify-between px-3 py-1 rounded ' + (i === 0 ? 'bg-violet-600/20 text-violet-300' : 'text-zinc-400') + '">' +
-        '<span>' + (i + 1) + '. ' + r.username + '</span>' +
-        '<span class="font-mono">' + r.presses + '</span></div>'
-      ).join('');
-      const total = leaderboard.reduce((s, r) => s + parseInt(r.presses), 0);
-      document.getElementById('count').textContent = total + ' total presses';
+      tctx.restore();
     }
 
-    document.getElementById('press-btn').addEventListener('click', async () => {
-      try {
-        const res = await fetch('/api/press', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...headers },
-        });
-        if (res.ok) loadLeaderboard();
-        else if (res.status === 401) document.getElementById('count').textContent = 'Sign in to press!';
-      } catch {}
+    function redrawBase() {
+      baseCtx.setTransform(1, 0, 0, 1, 0, 0);
+      baseCtx.clearRect(0, 0, base.width, base.height);
+      for (const s of strokes) drawStroke(baseCtx, s);
+    }
+
+    function render() {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(base, 0, 0);
+      for (const [, rs] of remoteDrawing) drawStroke(ctx, rs);
+      if (currentStroke) drawStroke(ctx, currentStroke);
+    }
+
+    function resize() {
+      const wrap = document.getElementById('canvas-wrap');
+      canvasW = wrap.clientWidth;
+      canvasH = wrap.clientHeight;
+      const dpr = devicePixelRatio || 1;
+      canvas.width = canvasW * dpr;
+      canvas.height = canvasH * dpr;
+      canvas.style.width = canvasW + 'px';
+      canvas.style.height = canvasH + 'px';
+      base.width = canvasW * dpr;
+      base.height = canvasH * dpr;
+      redrawBase();
+      render();
+    }
+
+    // --- Pointer events ---
+
+    let lastSendTime = 0;
+    let lastSentIdx = 0;
+    let lastCursorTime = 0;
+
+    function getPos(e) {
+      const r = canvas.getBoundingClientRect();
+      return { x: (e.clientX - r.left) / canvasW, y: (e.clientY - r.top) / canvasH };
+    }
+
+    canvas.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      isDrawing = true;
+      canvas.setPointerCapture(e.pointerId);
+      const p = getPos(e);
+      const size = activeTool === 'eraser' ? activeSize * 3 : activeSize;
+      currentStroke = { points: [p], color: activeColor, size, tool: activeTool, mine: true };
+      lastSentIdx = 0;
+      render();
     });
 
-    loadLeaderboard();
+    canvas.addEventListener('pointermove', (e) => {
+      const p = getPos(e);
+      const now = Date.now();
+
+      if (now - lastCursorTime > 50) {
+        wsSend({ type: 'cursor', x: p.x, y: p.y });
+        lastCursorTime = now;
+      }
+
+      if (!isDrawing || !currentStroke) return;
+      currentStroke.points.push(p);
+      render();
+
+      if (now - lastSendTime > 50) {
+        const newPts = currentStroke.points.slice(lastSentIdx);
+        wsSend({ type: 'drawing', points: newPts, color: currentStroke.color, size: currentStroke.size, tool: currentStroke.tool });
+        lastSentIdx = currentStroke.points.length;
+        lastSendTime = now;
+      }
+    });
+
+    canvas.addEventListener('pointerup', () => {
+      if (!isDrawing || !currentStroke) return;
+      isDrawing = false;
+
+      if (lastSentIdx < currentStroke.points.length) {
+        wsSend({ type: 'drawing', points: currentStroke.points.slice(lastSentIdx), color: currentStroke.color, size: currentStroke.size, tool: currentStroke.tool });
+      }
+
+      wsSend({ type: 'stroke', points: currentStroke.points, color: currentStroke.color, size: currentStroke.size, tool: currentStroke.tool });
+
+      strokes.push(currentStroke);
+      drawStroke(baseCtx, currentStroke);
+      currentStroke = null;
+      render();
+    });
+
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    // --- WebSocket ---
+
+    let ws = null;
+    let reconnectDelay = 1000;
+
+    function wsSend(msg) {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+    }
+
+    function connect() {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(proto + '//' + location.host + '/ws?token=' + encodeURIComponent(token));
+
+      ws.onopen = () => {
+        reconnectDelay = 1000;
+        document.getElementById('status-dot').className = 'w-2 h-2 rounded-full bg-emerald-500 flex-shrink-0';
+        document.getElementById('status-dot').title = 'Connected';
+      };
+
+      ws.onclose = () => {
+        document.getElementById('status-dot').className = 'w-2 h-2 rounded-full bg-red-500 flex-shrink-0';
+        document.getElementById('status-dot').title = 'Disconnected';
+        setTimeout(connect, reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+      };
+
+      ws.onmessage = (e) => {
+        let msg;
+        try { msg = JSON.parse(e.data); } catch { return; }
+        handleMessage(msg);
+      };
+    }
+
+    function parseStroke(s) {
+      return {
+        id: s.id, user_id: s.user_id,
+        points: typeof s.points === 'string' ? JSON.parse(s.points) : s.points,
+        color: s.color, size: s.size, tool: s.tool,
+      };
+    }
+
+    function handleMessage(msg) {
+      switch (msg.type) {
+        case 'init': {
+          myUserId = msg.you?.id;
+          strokes = (msg.strokes || []).map(s => {
+            const parsed = parseStroke(s);
+            parsed.mine = parsed.user_id === myUserId;
+            return parsed;
+          });
+          remoteDrawing.clear();
+          document.getElementById('cursors').innerHTML = '';
+          redrawBase();
+          render();
+          if (msg.users) updateUsersList(msg.users);
+          break;
+        }
+        case 'stroke': {
+          const s = msg.stroke;
+          remoteDrawing.delete(s.user_id);
+          const stroke = parseStroke(s);
+          strokes.push(stroke);
+          drawStroke(baseCtx, stroke);
+          render();
+          break;
+        }
+        case 'drawing': {
+          if (!remoteDrawing.has(msg.userId)) {
+            remoteDrawing.set(msg.userId, { points: [], color: msg.color, size: msg.size, tool: msg.tool });
+          }
+          const rd = remoteDrawing.get(msg.userId);
+          rd.points.push(...msg.points);
+          rd.color = msg.color;
+          rd.size = msg.size;
+          rd.tool = msg.tool;
+          render();
+          break;
+        }
+        case 'undo': {
+          const idx = strokes.findIndex(s => s.id === msg.strokeId);
+          if (idx !== -1) {
+            strokes.splice(idx, 1);
+            redrawBase();
+            render();
+          }
+          break;
+        }
+        case 'clear': {
+          strokes = [];
+          remoteDrawing.clear();
+          redrawBase();
+          render();
+          break;
+        }
+        case 'users': {
+          updateUsersList(msg.users);
+          break;
+        }
+        case 'cursor': {
+          setCursorEl(msg.userId, msg.username, msg.x, msg.y, msg.color);
+          break;
+        }
+        case 'cursor_remove': {
+          const el = document.getElementById('rc-' + msg.userId);
+          if (el) el.remove();
+          break;
+        }
+      }
+    }
+
+    // --- Remote cursors ---
+
+    function esc(str) {
+      const d = document.createElement('div');
+      d.textContent = str;
+      return d.innerHTML;
+    }
+
+    function setCursorEl(userId, username, x, y, color) {
+      let el = document.getElementById('rc-' + userId);
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'rc-' + userId;
+        el.style.cssText = 'position:absolute;pointer-events:none;transition:left 0.08s linear,top 0.08s linear;z-index:10;';
+        el.innerHTML =
+          '<div style="width:8px;height:8px;border-radius:50%;background:' + color + ';border:1.5px solid #fff;margin-left:-4px;margin-top:-4px"></div>' +
+          '<div style="font-size:10px;padding:0 4px;border-radius:3px;background:' + color + ';color:#fff;white-space:nowrap;margin-top:2px;margin-left:8px;line-height:1.4">' + esc(username) + '</div>';
+        document.getElementById('cursors').appendChild(el);
+      }
+      el.style.left = (x * canvasW) + 'px';
+      el.style.top = (y * canvasH) + 'px';
+    }
+
+    // --- Users list ---
+
+    function updateUsersList(userList) {
+      const el = document.getElementById('users-list');
+      el.innerHTML = userList.map(u =>
+        '<div class="flex items-center gap-1" title="' + esc(u.username) + '">' +
+        '<div class="user-dot" style="background:' + u.color + '"></div>' +
+        '<span class="text-xs text-zinc-500">' + esc(u.username) + '</span></div>'
+      ).join('');
+    }
+
+    // --- Toolbar ---
+
+    // Colors
+    const colorsEl = document.getElementById('colors');
+    COLORS.forEach(c => {
+      const btn = document.createElement('div');
+      btn.className = 'color-swatch' + (c === activeColor ? ' active' : '');
+      btn.style.background = c;
+      btn.addEventListener('click', () => {
+        activeColor = c;
+        colorsEl.querySelectorAll('.color-swatch').forEach(s => s.classList.toggle('active', s === btn));
+        if (activeTool === 'eraser') setTool('pen');
+        updateCanvasCursor();
+      });
+      colorsEl.appendChild(btn);
+    });
+
+    // Tools
+    document.querySelectorAll('.tool-btn').forEach(btn => {
+      btn.addEventListener('click', () => setTool(btn.dataset.tool));
+    });
+
+    function setTool(t) {
+      activeTool = t;
+      document.querySelectorAll('.tool-btn').forEach(b => b.classList.toggle('active', b.dataset.tool === t));
+      updateCanvasCursor();
+    }
+
+    // Size
+    const sizeRange = document.getElementById('size-range');
+    const sizeVal = document.getElementById('size-val');
+    sizeRange.addEventListener('input', () => {
+      activeSize = parseInt(sizeRange.value);
+      sizeVal.textContent = activeSize;
+      updateCanvasCursor();
+    });
+
+    // Canvas cursor
+    function updateCanvasCursor() {
+      const size = activeTool === 'eraser' ? activeSize * 3 : activeSize;
+      const r = Math.max(size / 2, 2);
+      const d = Math.ceil(r * 2 + 2);
+      const c = r + 1;
+      const sc = activeTool === 'eraser' ? '%23888888' : encodeURIComponent(activeColor);
+      const svg = "<svg xmlns='http://www.w3.org/2000/svg' width='" + d + "' height='" + d + "'><circle cx='" + c + "' cy='" + c + "' r='" + r + "' fill='none' stroke='" + sc + "' stroke-width='1'/></svg>";
+      canvas.style.cursor = 'url("data:image/svg+xml,' + svg + '") ' + c + ' ' + c + ', crosshair';
+    }
+
+    // Undo
+    document.getElementById('btn-undo').addEventListener('click', () => {
+      for (let i = strokes.length - 1; i >= 0; i--) {
+        if (strokes[i].mine) {
+          strokes.splice(i, 1);
+          redrawBase();
+          render();
+          wsSend({ type: 'undo' });
+          return;
+        }
+      }
+    });
+
+    // Clear
+    document.getElementById('btn-clear').addEventListener('click', () => {
+      strokes = [];
+      remoteDrawing.clear();
+      redrawBase();
+      render();
+      wsSend({ type: 'clear' });
+    });
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', (e) => {
+      if (e.target !== document.body) return;
+      if (e.key === 'p' || e.key === 'P') setTool('pen');
+      if (e.key === 'e' || e.key === 'E') setTool('eraser');
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+        e.preventDefault();
+        document.getElementById('btn-undo').click();
+      }
+    });
+
+    // --- Init ---
+    updateCanvasCursor();
+    resize();
+    window.addEventListener('resize', resize);
+    connect();
   </script>
 </body>
 </html>
