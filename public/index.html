@@ -97,7 +97,10 @@
     <div class="flex items-center bg-zinc-800/80 rounded-lg p-0.5 gap-0.5">
       <button data-tool="pen" class="tool-btn active px-2.5 py-1 rounded-md text-xs font-medium text-zinc-400">Pen</button>
       <button data-tool="eraser" class="tool-btn px-2.5 py-1 rounded-md text-xs font-medium text-zinc-400">Eraser</button>
+      <button data-tool="stamp" class="tool-btn px-2.5 py-1 rounded-md text-xs font-medium text-zinc-400">Stamp</button>
     </div>
+
+    <div id="stamp-picker" style="display:none" class="flex items-center gap-0.5 flex-shrink-0 bg-zinc-800/60 rounded-lg px-1.5 py-0.5"></div>
 
     <div class="w-px h-5 bg-zinc-700/60 flex-shrink-0"></div>
 
@@ -128,6 +131,7 @@
 
   <script>
     const COLORS = ['#1e1e1e','#6b7280','#dc2626','#ea580c','#ca8a04','#16a34a','#2563eb','#7c3aed','#db2777'];
+    const STAMPS = ['🔥','⭐','❤️','😀','👍','🎉','💡','🎨','🎯','✅','❌','❓','💎','🌈','🍕','🐱','🦊','⚡'];
 
     const params = new URLSearchParams(location.search);
     const token = params.get('token') || '';
@@ -138,6 +142,7 @@
     let activeTool = 'pen';
     let activeColor = COLORS[0];
     let activeSize = 3;
+    let activeStamp = STAMPS[0];
     let isDrawing = false;
     let canvasW = 0;
     let canvasH = 0;
@@ -154,6 +159,18 @@
       const pts = s.points;
       if (!pts || !pts.length) return;
       const dpr = devicePixelRatio || 1;
+
+      if (s.tool === 'stamp') {
+        tctx.save();
+        tctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        tctx.font = s.size + 'px serif';
+        tctx.textAlign = 'center';
+        tctx.textBaseline = 'middle';
+        tctx.fillText(s.color, pts[0].x * canvasW, pts[0].y * canvasH);
+        tctx.restore();
+        return;
+      }
+
       tctx.save();
       tctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       if (s.tool === 'eraser') tctx.globalCompositeOperation = 'destination-out';
@@ -229,9 +246,20 @@
 
     canvas.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
+      const p = getPos(e);
+
+      if (activeTool === 'stamp') {
+        const sz = activeSize * 3;
+        const stampStroke = { points: [p], color: activeStamp, size: sz, tool: 'stamp', mine: true };
+        strokes.push(stampStroke);
+        drawStroke(baseCtx, stampStroke);
+        render();
+        wsSend({ type: 'stroke', points: stampStroke.points, color: stampStroke.color, size: stampStroke.size, tool: stampStroke.tool });
+        return;
+      }
+
       isDrawing = true;
       canvas.setPointerCapture(e.pointerId);
-      const p = getPos(e);
       const size = activeTool === 'eraser' ? activeSize * 3 : activeSize;
       currentStroke = { points: [p], color: activeColor, size, tool: activeTool, mine: true };
       lastSentIdx = 0;
@@ -423,6 +451,23 @@
 
     // --- Toolbar ---
 
+    // Stamp picker
+    const stampPickerEl = document.getElementById('stamp-picker');
+    STAMPS.forEach(emoji => {
+      const btn = document.createElement('button');
+      btn.className = 'w-7 h-7 text-base rounded flex items-center justify-center transition hover:bg-zinc-600' +
+        (emoji === activeStamp ? ' bg-zinc-600 ring-1 ring-violet-400' : '');
+      btn.textContent = emoji;
+      btn.addEventListener('click', () => {
+        activeStamp = emoji;
+        stampPickerEl.querySelectorAll('button').forEach(b => {
+          b.className = 'w-7 h-7 text-base rounded flex items-center justify-center transition hover:bg-zinc-600' +
+            (b === btn ? ' bg-zinc-600 ring-1 ring-violet-400' : '');
+        });
+      });
+      stampPickerEl.appendChild(btn);
+    });
+
     // Colors
     const colorsEl = document.getElementById('colors');
     COLORS.forEach(c => {
@@ -446,6 +491,7 @@
     function setTool(t) {
       activeTool = t;
       document.querySelectorAll('.tool-btn').forEach(b => b.classList.toggle('active', b.dataset.tool === t));
+      stampPickerEl.style.display = t === 'stamp' ? 'flex' : 'none';
       updateCanvasCursor();
     }
 
@@ -460,6 +506,10 @@
 
     // Canvas cursor
     function updateCanvasCursor() {
+      if (activeTool === 'stamp') {
+        canvas.style.cursor = 'crosshair';
+        return;
+      }
       const size = activeTool === 'eraser' ? activeSize * 3 : activeSize;
       const r = Math.max(size / 2, 2);
       const d = Math.ceil(r * 2 + 2);
@@ -496,6 +546,7 @@
       if (e.target !== document.body) return;
       if (e.key === 'p' || e.key === 'P') setTool('pen');
       if (e.key === 'e' || e.key === 'E') setTool('eraser');
+      if (e.key === 's' || e.key === 'S') setTool('stamp');
       if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
         e.preventDefault();
         document.getElementById('btn-undo').click();
