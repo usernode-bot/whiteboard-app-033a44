@@ -195,12 +195,13 @@ async function start() {
       user_id INTEGER NOT NULL,
       username VARCHAR(255) NOT NULL,
       points JSONB NOT NULL,
-      color VARCHAR(20) NOT NULL DEFAULT '#000000',
+      color VARCHAR(50) NOT NULL DEFAULT '#000000',
       size INTEGER NOT NULL DEFAULT 3,
       tool VARCHAR(20) NOT NULL DEFAULT 'pen',
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+  await pool.query(`ALTER TABLE strokes ALTER COLUMN color TYPE VARCHAR(50)`);
   server.listen(port, () => console.log(`Listening on :${port}`));
 }
 
